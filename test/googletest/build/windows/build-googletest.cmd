@@ -43,7 +43,7 @@ CALL "%CMAKE_ROOT%\bin\cmake.exe" ^
 	-DCMAKE_INSTALL_PREFIX:PATH=%BUILD_OUTPUT% ^
 	-DPLATFORM=windows ^
 	%GTEST_HOME%\src
-CALL :CHECKERROR %ERRORLEVEL% "Error: Failed to configure googletest-framework || EXIT /b %ERRORLEVEL%
+CALL :CHECKERROR %ERRORLEVEL% "Error: Failed to configure googletest-framework" || EXIT /b %ERRORLEVEL%
 
 REM Call build
 REM
