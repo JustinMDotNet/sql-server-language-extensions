@@ -12,7 +12,9 @@
 //
 //*********************************************************************
 #include "CSharpExtensionApiTests.h"
+#include "LogXEventTestHarness.h"
 
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -22,55 +24,6 @@ using namespace std;
 namespace ExtensionApiTest
 {
     typedef SQLRETURN FN_setHostCallbacks(SQLEXTENSION_HOST_CALLBACKS *);
-
-    namespace
-    {
-        // Captured invocation of the host LogXEvent callback.
-        //
-        struct CapturedLogEvent
-        {
-            string       extensionName;
-            SQLUSMALLINT traceLevel;
-            SQLINTEGER   errorCode;
-            string       message;
-        };
-
-        // File-scope storage for events captured by TestLogXEventCallback.
-        // Cleared at the start of each test that uses it.
-        //
-        static vector<CapturedLogEvent> g_capturedLogEvents;
-
-        // Test stand-in for host's LogXEvent implementation. Records the
-        // invocation so the test can assert on its contents.
-        //
-        extern "C" void TestLogXEventCallback(
-            const SQLCHAR *extensionName,
-            SQLULEN        extensionNameLength,
-            SQLGUID        sessionId,
-            SQLUSMALLINT   taskId,
-            SQLUSMALLINT   traceLevel,
-            SQLINTEGER     errorCode,
-            const SQLCHAR *message,
-            SQLULEN        messageLength)
-        {
-            CapturedLogEvent ev;
-            if (extensionName != nullptr && extensionNameLength > 0)
-            {
-                ev.extensionName.assign(
-                    reinterpret_cast<const char *>(extensionName),
-                    static_cast<size_t>(extensionNameLength));
-            }
-            ev.traceLevel = traceLevel;
-            ev.errorCode  = errorCode;
-            if (message != nullptr && messageLength > 0)
-            {
-                ev.message.assign(
-                    reinterpret_cast<const char *>(message),
-                    static_cast<size_t>(messageLength));
-            }
-            g_capturedLogEvents.push_back(std::move(ev));
-        }
-    }
 
 #define RESOLVE_SET_HOST_CALLBACKS() \
     reinterpret_cast<FN_setHostCallbacks *>( \
@@ -106,6 +59,43 @@ namespace ExtensionApiTest
         EXPECT_EQ(rc, SQL_ERROR);
     }
 
+    TEST_F(CSharpExtensionApiTests, SetHostCallbacks_IncompleteStructureReturnsError)
+    {
+        FN_setHostCallbacks *fn = RESOLVE_SET_HOST_CALLBACKS();
+        ASSERT_NE(fn, nullptr);
+
+        SQLEXTENSION_HOST_CALLBACKS hostCallbacks{};
+        hostCallbacks.Version = SQLEXTENSION_HOST_CALLBACKS_VERSION_1;
+        hostCallbacks.SizeInBytes = offsetof(SQLEXTENSION_HOST_CALLBACKS, LogXEvent);
+        hostCallbacks.LogXEvent = &TestLogXEventCallback;
+
+        EXPECT_EQ(fn(&hostCallbacks), SQL_ERROR);
+    }
+
+    TEST_F(CSharpExtensionApiTests, SetHostCallbacks_MinimumV1StructureIsAccepted)
+    {
+        FN_setHostCallbacks *fn = RESOLVE_SET_HOST_CALLBACKS();
+        ASSERT_NE(fn, nullptr);
+
+        struct V1HostCallbacks
+        {
+            SQLUSMALLINT             Version;
+            SQLUSMALLINT             Reserved0;
+            SQLUINTEGER              SizeInBytes;
+            PFunc_ExtensionLogXEvent LogXEvent;
+        };
+
+        g_capturedLogEvents.clear();
+
+        V1HostCallbacks hostCallbacks{};
+        hostCallbacks.Version = SQLEXTENSION_HOST_CALLBACKS_VERSION_1;
+        hostCallbacks.SizeInBytes = sizeof(hostCallbacks);
+        hostCallbacks.LogXEvent = &TestLogXEventCallback;
+
+        EXPECT_EQ(fn(reinterpret_cast<SQLEXTENSION_HOST_CALLBACKS *>(&hostCallbacks)), SQL_SUCCESS);
+        EXPECT_FALSE(g_capturedLogEvents.empty());
+    }
+
     //----------------------------------------------------------------------------------------------
     // Name: SetHostCallbacks_RegistersAndForwardsLogXEvent
     //
@@ -123,8 +113,9 @@ namespace ExtensionApiTest
         g_capturedLogEvents.clear();
 
         SQLEXTENSION_HOST_CALLBACKS hostCallbacks{};
-        hostCallbacks.Version    = SQLEXTENSION_HOST_CALLBACKS_VERSION_1;
-        hostCallbacks.LogXEvent  = &TestLogXEventCallback;
+        hostCallbacks.Version     = SQLEXTENSION_HOST_CALLBACKS_VERSION_1;
+        hostCallbacks.SizeInBytes = sizeof(hostCallbacks);
+        hostCallbacks.LogXEvent   = &TestLogXEventCallback;
 
         SQLRETURN rc = fn(&hostCallbacks);
         EXPECT_EQ(rc, SQL_SUCCESS);
@@ -157,8 +148,9 @@ namespace ExtensionApiTest
         g_capturedLogEvents.clear();
 
         SQLEXTENSION_HOST_CALLBACKS hostCallbacks{};
-        hostCallbacks.Version   = SQLEXTENSION_HOST_CALLBACKS_VERSION_1;
-        hostCallbacks.LogXEvent = nullptr;
+        hostCallbacks.Version     = SQLEXTENSION_HOST_CALLBACKS_VERSION_1;
+        hostCallbacks.SizeInBytes = sizeof(hostCallbacks);
+        hostCallbacks.LogXEvent   = nullptr;
 
         SQLRETURN rc = fn(&hostCallbacks);
         EXPECT_EQ(rc, SQL_SUCCESS);

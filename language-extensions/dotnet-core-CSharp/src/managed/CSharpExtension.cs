@@ -16,6 +16,7 @@ using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Microsoft.SqlServer.CSharpExtension.SDK;
 using static Microsoft.SqlServer.CSharpExtension.Sql;
 
 namespace Microsoft.SqlServer.CSharpExtension
@@ -696,6 +697,10 @@ namespace Microsoft.SqlServer.CSharpExtension
         /// 
         private const ushort MinSupportedHostCallbacksVersion = 1;
 
+        private static readonly uint MinimumHostCallbacksSize = checked(
+            (uint)(Marshal.OffsetOf<SqlExtensionHostCallbacks>(
+                nameof(SqlExtensionHostCallbacks.LogXEvent)).ToInt64() + IntPtr.Size));
+
         /// <summary>
         /// This delegate declares the delegate type of SetHostCallbacks.
         /// </summary>
@@ -738,19 +743,26 @@ namespace Microsoft.SqlServer.CSharpExtension
                         hostCallbacks->Version);
                 }
 
+                if (hostCallbacks->SizeInBytes < MinimumHostCallbacksSize)
+                {
+                    Logging.Error("CSharpExtension::SetHostCallbacks: incomplete host callbacks structure");
+                    throw new ArgumentException(
+                        "Incomplete SQLEXTENSION_HOST_CALLBACKS structure.",
+                        nameof(hostCallbacks));
+                }
+
                 if (hostCallbacks->LogXEvent != IntPtr.Zero)
                 {
                     var logXEvent = Marshal.GetDelegateForFunctionPointer<LogXEventCallbackDelegate>(
                         hostCallbacks->LogXEvent);
                     Logging.SetLogXEventCallback(logXEvent);
 
-                    Logging.LogXEvent(
-                        extensionName: null,
-                        Guid.Empty,
-                        taskId: 0,
-                        traceLevel: Logging.TraceLevel.Information,
-                        errorCode: 0,
-                        "CSharp extension loaded, host callbacks registered (version " + hostCallbacks->Version + ")");
+                    // Route SDK facade logging from ExtensionEventLogger to the host's XEvent callback.
+                    //
+                    ExtensionEventLogger.Sink = new XEventLogSink();
+
+                    ExtensionEventLogger.LogInformation(
+                        $"CSharp extension loaded. Host callbacks registered with version {hostCallbacks->Version}.");
                 }
                 else
                 {
@@ -940,9 +952,12 @@ namespace Microsoft.SqlServer.CSharpExtension
             }
             catch (Exception e)
             {
-                string stackTracePart = string.IsNullOrEmpty(e.StackTrace) ? string.Empty : e.StackTrace + Environment.NewLine;
-                Logging.Error(stackTracePart + "Error: " + e.Message);
-                SetLibraryError(e.Message, libraryError, libraryErrorLength);
+                Logging.Error($"InstallExternalLibrary failed: {e}");
+
+                // User-facing channel: messages only, including the inner-exception chain.
+                // Type names and stack frames are deliberately omitted - a DBA needs the cause,
+                // not the implementation.
+                SetLibraryError(FlattenMessages(e), libraryError, libraryErrorLength);
                 result = SQL_ERROR;
             }
             finally
@@ -1417,13 +1432,42 @@ namespace Microsoft.SqlServer.CSharpExtension
             }
             catch (Exception e)
             {
-                string stackTracePart = string.IsNullOrEmpty(e.StackTrace) ? string.Empty : e.StackTrace + Environment.NewLine;
-                Logging.Error(stackTracePart + "Error: " + e.Message);
-                SetLibraryError(e.Message, libraryError, libraryErrorLength);
+                // User-facing channel: messages only, including the inner-exception chain.
+                // Type names and stack frames are deliberately omitted - a DBA needs the cause,
+                // not the implementation.
+                Logging.Error($"UninstallExternalLibrary failed: {e}");
+                SetLibraryError(FlattenMessages(e), libraryError, libraryErrorLength);
                 result = SQL_ERROR;
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Flattens an exception's message chain into a single user-facing string.
+        /// Walks <c>InnerException</c> and joins each level's <c>Message</c> with
+        /// " ---> ". Returns <c>"&lt;no message&gt;"</c> if the exception and all
+        /// inner exceptions have empty messages.
+        /// </summary>
+        /// <remarks>
+        /// Message-only counterpart to <see cref="Exception.ToString"/>: same
+        /// chain-walking behavior, but no type names and no stack frames. Used to
+        /// populate <see cref="SetLibraryError"/>'s libraryError out-parameter.
+        /// The user does not need (and should not see) managed type names or stack traces.
+        /// They DO need the inner-exception message because exception wrappers have
+        /// generic outer messages and the actionable detail lives in the inner exception.
+        /// </remarks>
+        private static string FlattenMessages(Exception e)
+        {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder(e.Message ?? string.Empty);
+            for (Exception inner = e.InnerException; inner != null; inner = inner.InnerException)
+            {
+                if (!string.IsNullOrEmpty(inner.Message))
+                {
+                    sb.Append(" ---> ").Append(inner.Message);
+                }
+            }
+            return sb.Length == 0 ? "<no message>" : sb.ToString();
         }
 
         /// <summary>
